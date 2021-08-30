@@ -3,9 +3,6 @@ module LSTJulia
 using CSV
 using DataFrames
 using Arrow
-using ProgressMeter
-using StatProfilerHTML
-using DataFrames
 
 export studyfishbone, writearrow
 
