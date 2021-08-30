@@ -1,0 +1,4 @@
+name = "LSTJulia"
+uuid = "956486ed-fa8d-4eaf-92ac-0cb4561e7385"
+authors = ["Philip Chang <philip@ucsd.edu>"]
+version = "0.1.0"
