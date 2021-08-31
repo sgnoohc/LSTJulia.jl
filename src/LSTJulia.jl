@@ -3,8 +3,12 @@ module LSTJulia
 using CSV
 using DataFrames
 using Arrow
+using Query
+using PlotlyJSWrapper
+using FHist
+using ProgressMeter
 
-export studyfishbone, writearrow
+export studyfishbone, writearrow, make_fb_mult_plots, make_angle_plots
 
 # _________________________________________________________________________________________________________________________________
 struct Segment
@@ -132,9 +136,16 @@ end
 
 # _________________________________________________________________________________________________________________________________
 @inline function deltaxy(v1::Segment, v2::Segment)
-    dx = v1.hit5x-v2.hit5x
-    dy = v1.hit5y-v2.hit5y
-    dxy = sqrt(dx^2+dy^2)
+    smd = sharemd(v1, v2)
+    if smd == 1
+        dx = v1.hit5x-v2.hit5x
+        dy = v1.hit5y-v2.hit5y
+        dxy = sqrt(dx^2+dy^2)
+    else
+        dx = v1.hit4x-v2.hit4x
+        dy = v1.hit4y-v2.hit4y
+        dxy = sqrt(dx^2+dy^2)
+    end
 end
 
 # _________________________________________________________________________________________________________________________________
@@ -221,61 +232,6 @@ function moduledifftype(v1::Segment, v2::Segment)
 end
 
 # _________________________________________________________________________________________________________________________________
-function issegmentofinterest(v1::Segment)
-    # Segment selection
-    v1.layer0 != 1 && return false
-    v1.layer1 != 2 && return false
-    v1.isFlatBarrel0 != 1 && return false
-    v1.isFlatBarrel1 != 1 && return false
-    return true
-end
-
-# _________________________________________________________________________________________________________________________________
-function add_segment!(segsdict::Dict{Int, Vector{Segment}}, nsegsdict::Dict{Int, Int}, v1::Segment)
-    # Organize by simidx
-    if haskey(segsdict, v1.simidx1)
-        push!(segsdict[v1.simidx1], v1)
-        nsegsdict[v1.simidx1] += 1
-    else
-        segsdict[v1.simidx1] = Segment[v1]
-        nsegsdict[v1.simidx1] = 1
-    end
-end
-
-# _________________________________________________________________________________________________________________________________
-function organize_segments!(segments_dict::Dict{Int, Vector{Segment}}, nsegments_dict::Dict{Int, Int}, evt::Vector{Segment})
-    # Loop over segments and organize by simidx
-    for i in 1:length(evt)
-        seg = evt[i]
-        # !issegmentofinterest(seg) && continue
-        !istruth(seg) && continue
-        add_segment!(segments_dict, nsegments_dict, seg)
-    end
-end
-
-# _________________________________________________________________________________________________________________________________
-function get_sgpairangles(segments_dict)
-    angledata = SegmentPairAngle[]
-    for (simidx, segs) in segments_dict
-        for i in 1:length(segs)
-            for j in i+1:length(segs)
-                smd = sharemd(segs[i], segs[j])
-                moddiff = moduledifftype(segs[i], segs[j])
-                Δϕ = deltaphi(segs[i], segs[j])
-                Δθ = deltatheta(segs[i], segs[j])
-                Δxy = deltaxy(segs[i], segs[j])
-                if smd >= 1
-                    push!(angledata, SegmentPairAngle(smd, moddiff, Δϕ, Δθ, Δxy))
-                elseif smd < 0
-                    println("ERROR: these are same md! Why are you comparing same segments?")
-                end
-            end
-        end
-    end
-    return angledata
-end
-
-# _________________________________________________________________________________________________________________________________
 function fishboneresult(v1::Segment, v2::Segment)
     moddiff = moduledifftype(v1, v2)
     moddiff == 0 || moddiff == 4 && return 0 # keep both
@@ -330,159 +286,264 @@ function runfishbone(segs)
 end
 
 # _________________________________________________________________________________________________________________________________
+function getangledata(evt_)
+    segs = Dict{Int, Vector{Segment}}()
+    nsegs = Int[]
+
+    # println(length(evt_))
+
+    evt = filter(x->istruth(x), evt_)
+
+    # println(evt_ .|> x->x.simidx1)
+
+    # Get all the possible simidxs
+    simidxs = evt .|> x->x.simidx1
+
+    # Loop over possible simidxs
+    for simidx in Set(simidxs)
+
+        # Aggregate the segments
+        sgs = filter(x->x.simidx1 == simidx, evt)
+        segs[simidx] = sgs
+        push!(nsegs, length(sgs))
+
+    end
+
+    angledata = SegmentPairAngle[]
+    for (simidx, sgs) in segs
+        for i in 1:length(sgs)
+            for j in i+1:length(sgs)
+                smd = sharemd(sgs[i], sgs[j])
+                moddiff = moduledifftype(sgs[i], sgs[j])
+                Δϕ = deltaphi(sgs[i], sgs[j])
+                Δθ = deltatheta(sgs[i], sgs[j])
+                Δxy = deltaxy(sgs[i], sgs[j])
+                if smd >= 1
+                    push!(angledata, SegmentPairAngle(smd, moddiff, Δϕ, Δθ, Δxy))
+                elseif smd < 0
+                    println("ERROR: these are same md! Why are you comparing same segments?")
+                end
+            end
+        end
+    end
+    return (angledata, nsegs)
+end
+
+# _________________________________________________________________________________________________________________________________
 function studyfishbone(fn)
 
+    # Full file name
+    fulln = "data/segment/$fn.arrow"
+
+    @info "Opening up file $fulln"
+
     # Open up the segments data
-    table = Arrow.Table("data/segment/$fn.arrow")
+    table = Arrow.Table("$fulln")
 
     # All the segment pairs to be plotted
     sgpairs = Vector{SegmentPairAngle}()
     sgpairs_fb = Vector{SegmentPairAngle}()
+    nsims = Vector{Int}()
+    ndups = Vector{Int}()
+    nsims_fb = Vector{Int}()
+    ndups_fb = Vector{Int}()
+
+    @info "Looping..."
 
     # Loop over the segment data
-    for evt in table.event
-
-        df = DataFrame(evt)
-
-        gdf = groupby(df, ["simidx1"])
-
-        println(gdf)
-
-        break
-
-        # # information to process for the event
-        # segs = Dict{Int, Vector{Segment}}()
-
-        # # Loop over segments and organize by simidx
-        # for i in 1:length(evt)
-
-        #     # Get the segment
-        #     seg = evt[i]
-
-        #     # Check if it is a true segment
-        #     !istruth(seg) && continue
-
-        #     # Organize by simidx
-        #     if haskey(segsdict, seg.simidx1)
-        #         push!(segsdict[seg.simidx1], seg)
-        #         nsegsdict[seg.simidx1] += 1
-        #     else
-        #         segsdict[seg.simidx1] = Segment[seg]
-        #         nsegsdict[seg.simidx1] = 1
-        #     end
-        # end
+    @showprogress for evt in table.event
+        # Regular
+        (a, n) = getangledata(evt)
+        append!(sgpairs, a)
+        nsim = length(n)
+        push!(nsims, nsim)
+        ndup = length(filter(x->x>1, n))
+        push!(ndups, ndup)
+        # Run fishbone
+        evt_fb = runfishbone(evt)
+        # Fishboned
+        (a, n) = getangledata(evt_fb)
+        append!(sgpairs_fb, a)
+        nsim_fb = length(n)
+        push!(nsims_fb, nsim_fb)
+        ndup_fb = length(filter(x->x>1, n))
+        push!(ndups_fb, ndup_fb)
     end
+
+    df = DataFrame(
+                   nsims = nsims,
+                   nsims_fb = nsims_fb,
+                   ndups = ndups,
+                   ndups_fb = ndups_fb,
+                  )
+
+    @time Arrow.write("data/angle/$fn.arrow", sgpairs)
+    @info "Wrote data/angle/$fn.arrow"
+    @time Arrow.write("data/anglefb/$fn.arrow", sgpairs_fb)
+    @info "Wrote data/anglefb/$fn.arrow"
+    @time Arrow.write("data/fb/$fn.arrow", df)
+    @info "Wrote data/fb/$fn.arrow"
+
+end
+
+# # _________________________________________________________________________________________________________________________________
+# function getangledata(fn)
+#     table = Arrow.Table("data/angle/$fn.arrow")
+#     df = DataFrame(table)
+#     as = []
+#     for item in 1:4
+#         angledata = df |> @filter(_.moddifftype == item) |> DataFrame
+#         push!(as, angledata)
+#     end
+#     return as
+# end
+
+# _________________________________________________________________________________________________________________________________
+function make_fb_mult_plots(fn)
+
+    table = Arrow.Table("data/fb/$fn.arrow")
+    df = DataFrame(table)
+
+    bins = if occursin("PU200", fn)
+        0:20:500
+    else
+        0:1:20
+    end
+
+    nsims = Hist1D(df.nsims, bins)
+    nsims_fb = Hist1D(df.nsims_fb, bins)
+
+    bins = if occursin("PU200", fn)
+        0:1:100
+    else
+        0:1:20
+    end
+
+    ndups = Hist1D(df.ndups, bins)
+    ndups_fb = Hist1D(df.ndups_fb, bins)
+
+    p = plot_stack(
+         backgrounds=[nsims],
+         signals=[nsims_fb],
+         outputname=string("plots/",fn,"_nsims.{html,pdf}"),
+         backgroundlabels=["before fishbone"],
+         signallabels=["after fishbone"],
+         xaxistitle="N<sub>sims</sub>",
+         showtotallegend=false,
+         showbeaminfo=false,
+         backgroundcolors=[6004],
+         cmsextralabeltext="Simulation",
+        );
+
+    p = plot_stack(
+         backgrounds=[ndups],
+         signals=[ndups_fb],
+         outputname=string("plots/",fn,"_ndups.{html,pdf}"),
+         backgroundlabels=["before fishbone"],
+         signallabels=["after fishbone"],
+         xaxistitle="N<sub>dups</sub>",
+         showtotallegend=false,
+         showbeaminfo=false,
+         backgroundcolors=[6004],
+         cmsextralabeltext="Simulation",
+        );
+
+    return
 
 end
 
 # _________________________________________________________________________________________________________________________________
-function studyfishbone_v1(fn)
-
-    # Open up the segments data
-    table = Arrow.Table("data/segment/$fn.arrow")
-
-    sgpairs = SegmentPairAngle[]
-    sgpairs_fb = SegmentPairAngle[]
-
-    # Loop over the events
-    for evt in table.event
-        # information to process for the event
-        segments_dict = Dict{Int, Vector{Segment}}()
-        nsegments_dict = Dict{Int, Int}()
-        organize_segments!(segments_dict, nsegments_dict, evt)
-        append!(sgpairs, get_sgpairangles(segments_dict))
-
-        evt_fishboned = runfishbone(evt)
-        segments_fishboned_dict = Dict{Int, Vector{Segment}}()
-        nsegments_fishboned_dict = Dict{Int, Int}()
-        organize_segments!(segments_fishboned_dict, nsegments_fishboned_dict, evt_fishboned)
-        append!(segmentpairangledata_fishboned[Threads.threadid()], get_sgpairangles(segments_fishboned_dict))
-        nsims = length(nsegments_dict)
-        nsims_fishboned = length(nsegments_fishboned_dict)
-
-        ndups = 0
-        for (key, nseg) in nsegments_dict
-            if nseg > 1
-                ndups += 1
-            end
-        end
-        ndups_fishboned = 0
-        for (key, nseg) in nsegments_fishboned_dict
-            if nseg > 1
-                ndups_fishboned += 1
-            end
-        end
-        # println("$nsims $nsims_fishboned $ndups $ndups_fishboned")
-        push!(nsims_list, nsims)
-        push!(nsims_fishboned_list, nsims_fishboned)
-        push!(ndups_list, ndups)
-        push!(ndups_fishboned_list, ndups_fishboned)
+function make_angle_plots(fn)
+    table = Arrow.Table("data/angle/$fn.arrow")
+    df = DataFrame(table)
+    as = []
+    for item in 1:4
+        angledata = df |> @filter(_.moddifftype == item) |> DataFrame
+        push!(as, angledata)
     end
 
-    segmentpairangledata = Vector{SegmentPairAngle}[]
-    for i in 1:Threads.nthreads()
-        push!(segmentpairangledata, SegmentPairAngle[])
-    end
+    ylog = occursin("PU200", fn)
+    yrange = [-1, 10]
+    ylog = false
+    yrange = [0, 500]
 
-    segmentpairangledata_fishboned = Vector{SegmentPairAngle}[]
-    for i in 1:Threads.nthreads()
-        push!(segmentpairangledata_fishboned, SegmentPairAngle[])
-    end
+    hs = as .|> x->Hist1D(abs.(x.Δϕ), 0:0.0005:0.02)
 
-    nsims_list = Int[]
-    nsims_fishboned_list = Int[]
-    ndups_list = Int[]
-    ndups_fishboned_list = Int[]
+    p = plot_stack(
+                   backgrounds=[hs[4]],
+                   signals=[hs[1], hs[2], hs[3]],
+                   outputname=string("plots/",fn,"_deltaphi.{html,pdf}"),
+                   backgroundlabels=["moddiff4"],
+                   signallabels=["moddiff1", "moddiff2", "moddiff3"],
+                   xaxistitle="Δϕ [rad]",
+                   showtotallegend=false,
+                   showbeaminfo=false,
+                   backgroundcolors=[6004],
+                   cmsextralabeltext="Simulation",
+                   ylog=ylog,
+                   yrange=yrange,
+                  );
 
-    # Loop over the events
-    @time for evt in table.event
-        # information to process for the event
-        segments_dict = Dict{Int, Vector{Segment}}()
-        nsegments_dict = Dict{Int, Int}()
-        organize_segments!(segments_dict, nsegments_dict, evt)
-        append!(segmentpairangledata[Threads.threadid()], get_sgpairangles(segments_dict))
+    hs = as .|> x->Hist1D(abs.(x.Δθ), 0:0.0005:0.02)
 
-        evt_fishboned = runfishbone(evt)
-        segments_fishboned_dict = Dict{Int, Vector{Segment}}()
-        nsegments_fishboned_dict = Dict{Int, Int}()
-        organize_segments!(segments_fishboned_dict, nsegments_fishboned_dict, evt_fishboned)
-        append!(segmentpairangledata_fishboned[Threads.threadid()], get_sgpairangles(segments_fishboned_dict))
-        nsims = length(nsegments_dict)
-        nsims_fishboned = length(nsegments_fishboned_dict)
+    p = plot_stack(
+                   backgrounds=[hs[4]],
+                   signals=[hs[1], hs[2], hs[3]],
+                   outputname=string("plots/",fn,"_deltarz.{html,pdf}"),
+                   backgroundlabels=["moddiff4"],
+                   signallabels=["moddiff1", "moddiff2", "moddiff3"],
+                   xaxistitle="Δrz [rad]",
+                   showtotallegend=false,
+                   showbeaminfo=false,
+                   backgroundcolors=[6004],
+                   cmsextralabeltext="Simulation",
+                   ylog=ylog,
+                   yrange=yrange,
+                  );
 
-        ndups = 0
-        for (key, nseg) in nsegments_dict
-            if nseg > 1
-                ndups += 1
-            end
-        end
-        ndups_fishboned = 0
-        for (key, nseg) in nsegments_fishboned_dict
-            if nseg > 1
-                ndups_fishboned += 1
-            end
-        end
-        # println("$nsims $nsims_fishboned $ndups $ndups_fishboned")
-        push!(nsims_list, nsims)
-        push!(nsims_fishboned_list, nsims_fishboned)
-        push!(ndups_list, ndups)
-        push!(ndups_fishboned_list, ndups_fishboned)
-    end
+    hs = as .|> x->Hist1D(abs.(x.Δxy), 0:0.05:4)
 
-    df = DataFrame(
-                   nsims = nsims_list,
-                   nsims_fishboned = nsims_fishboned_list,
-                   ndups = ndups_list,
-                   ndups_fishboned = ndups_fishboned_list
-                  )
+    p = plot_stack(
+                   backgrounds=[hs[4]],
+                   signals=[hs[1], hs[2], hs[3]],
+                   outputname=string("plots/",fn,"_deltaxy.{html,pdf}"),
+                   backgroundlabels=["moddiff4"],
+                   signallabels=["moddiff1", "moddiff2", "moddiff3"],
+                   xaxistitle="Δxy [cm]",
+                   showtotallegend=false,
+                   showbeaminfo=false,
+                   backgroundcolors=[6004],
+                   cmsextralabeltext="Simulation",
+                   ylog=ylog,
+                   yrange=yrange,
+                  );
 
-    segmentpairangledata = vcat(segmentpairangledata...)
-    segmentpairangledata_fishboned = vcat(segmentpairangledata_fishboned...)
 
-    @time Arrow.write("data/angle/$fn.arrow")
-    @time Arrow.write("data/anglefb/$fn.arrow")
-    @time Arrow.write("data/fb/$fn.arrow")
+        # h = Hist1D(abs.(angledata.Δϕ), 0:0.0005:0.02)
+        # p = plot_stack(
+        #                backgrounds=[h],
+        #                signals=[nsims_fb],
+        #                outputname="nsims.{html,pdf}",
+        #                backgroundlabels=["before fishbone"],
+        #                signallabels=["after fishbone"],
+        #                xaxistitle="N<sub>sims</sub>",
+        #                showtotallegend=false,
+        #                showbeaminfo=false,
+        #               );
 
+
+
+        # p = plot(trace, Layout(title="Δϕ distribution diffmode=$item", xaxis_title="Δϕ [rad]", yaxis_title="Events", bargap=0, template="simple_white"))
+        # savefig(p, string("plots/moddifftypewide",item,"_",jobidx,"_dphi.pdf"))
+        # savefig(p, string("plots/moddifftypewide",item,"_",jobidx,"_dphi.png"))
+
+        # trace = PlotlyJSWrapper.build_hist1dtrace(PlotlyJSWrapper.make_fhist1d(abs.(angledata.Δθ), 0:0.0005:0.02), witherror=true)
+        # # trace.fields[:marker][:color] = "blue"
+        # # trace.fields[:opacity] = 0.75
+        # p = plot(trace, Layout(title="Δrz distribution diffmode=$item", xaxis_title="Δrz [rad]", yaxis_title="Events", bargap=0, template="simple_white"))
+        # savefig(p, string("plots/moddifftypewide",item,"_",jobidx,"_drz.pdf"))
+        # savefig(p, string("plots/moddifftypewide",item,"_",jobidx,"_drz.png"))
+    # end
 end
 
 end
