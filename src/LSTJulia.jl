@@ -8,7 +8,7 @@ using PlotlyJSWrapper
 using FHist
 using ProgressMeter
 
-export studyfishbone, writearrow, make_fb_mult_plots, make_angle_plots
+export studyfishbone, writearrow, make_fb_mult_plots, make_angle_plots, make_angle_hists, make_mult_hists
 
 # _________________________________________________________________________________________________________________________________
 struct Segment
@@ -57,6 +57,12 @@ struct Segment
 end
 ArrowTypes.arrowname(::Type{Segment}) = :Segment
 ArrowTypes.JuliaType(::Val{:Segment}) = Segment
+
+# _________________________________________________________________________________________________________________________________
+function Base.show(io::IO, s::Segment)
+    println(io)
+    println(io, "L1: ", s.layer0, " L2: ", s.layer1, " M1: ", s.moduleId0, " M2: ", s.moduleId1, " R1: ", s.rod0, " R2: ", s.rod1, " sim: ", s.simidx0, " ", s.simidx1, " ", s.simidx2, " ", s.simidx3, " ", s.simidx4, " ", s.simidx5, " ")
+end
 
 # _________________________________________________________________________________________________________________________________
 struct SegmentPairAngle
@@ -158,6 +164,7 @@ end
 
 # _________________________________________________________________________________________________________________________________
 @inline function istruth(v1::Segment)
+    v1.simidx0 < 0 && return false
     v1.simidx0 != v1.simidx1 && return false
     v1.simidx0 != v1.simidx2 && return false
     v1.simidx0 != v1.simidx3 && return false
@@ -233,6 +240,11 @@ end
 
 # _________________________________________________________________________________________________________________________________
 function fishboneresult(v1::Segment, v2::Segment)
+    fishboneresult_v2(v1, v2)
+end
+
+# _________________________________________________________________________________________________________________________________
+function fishboneresult_v1(v1::Segment, v2::Segment)
     moddiff = moduledifftype(v1, v2)
     moddiff == 0 || moddiff == 4 && return 0 # keep both
     Δϕ = abs(deltaphi(v1, v2))
@@ -240,23 +252,59 @@ function fishboneresult(v1::Segment, v2::Segment)
     r3v1 = r3(v1)
     r3v2 = r3(v2)
     overlap = false
+    
+    l1 = v1.layer0
+    l2 = v1.layer1
 
-    # Boundary obtained with low pt muon gun sample (DEPRECATED)
-    # if moddiff == 1 && Δϕ > 0.001 && Δϕ < 0.004 && Δθ < 0.01
-    #     overlap = true
-    # elseif moddiff == 2 && Δϕ > 0.005 && Δϕ < 0.016 && Δθ < 0.014
-    #     overlap = true
-    # elseif moddiff == 3 && Δϕ > 0.004 && Δϕ < 0.02  && Δθ < 0.014
-    #     overlap = true
-    # end
-
-    # Boundary considering high muon gun as well
     if moddiff == 1 && Δϕ < 0.004 && Δθ < 0.014
         overlap = true
     elseif moddiff == 2 && Δϕ < 0.016 && Δθ < 0.014
         overlap = true
     elseif moddiff == 3 && Δϕ < 0.02  && Δθ < 0.014
         overlap = true
+    end
+
+    if overlap
+        if r3v1 <= r3v2
+            return 1
+        else
+            return 2
+        end
+    else
+        return 0
+    end
+end
+
+# _________________________________________________________________________________________________________________________________
+function fishboneresult_v2(v1::Segment, v2::Segment)
+    moddiff = moduledifftype(v1, v2)
+    moddiff == 0 || moddiff == 4 && return 0 # keep both
+    Δϕ = abs(deltaphi(v1, v2))
+    Δθ = abs(deltatheta(v1, v2))
+    r3v1 = r3(v1)
+    r3v2 = r3(v2)
+    overlap = false
+    
+    l1 = v1.layer0
+    l2 = v1.layer1
+
+    # Boundary considering high muon gun as well
+    if l2 <= 3
+        if moddiff == 1 && Δϕ < 0.004 && Δθ < 0.014
+            overlap = true
+        elseif moddiff == 2 && Δϕ < 0.016 && Δθ < 0.014
+            overlap = true
+        elseif moddiff == 3 && Δϕ < 0.02  && Δθ < 0.014
+            overlap = true
+        end
+    else
+        if moddiff == 1 && Δϕ < 0.004 && Δθ < 0.5
+            overlap = true
+        elseif moddiff == 2 && Δϕ < 0.024 && Δθ < 0.15
+            overlap = true
+        elseif moddiff == 3 && Δϕ < 0.028  && Δθ < 0.3
+            overlap = true
+        end
     end
 
     if overlap
@@ -352,6 +400,9 @@ function studyfishbone(fn)
 
     # Loop over the segment data
     @showprogress for evt in table.event
+        # # Study diff1 with larger than
+        # studyleak(evt)
+        # return
         # Regular
         (a, n) = getangledata(evt)
         append!(sgpairs, a)
@@ -386,17 +437,48 @@ function studyfishbone(fn)
 
 end
 
-# # _________________________________________________________________________________________________________________________________
-# function getangledata(fn)
-#     table = Arrow.Table("data/angle/$fn.arrow")
-#     df = DataFrame(table)
-#     as = []
-#     for item in 1:4
-#         angledata = df |> @filter(_.moddifftype == item) |> DataFrame
-#         push!(as, angledata)
-#     end
-#     return as
-# end
+# _________________________________________________________________________________________________________________________________
+function studyleak(evt_)
+    segs = Dict{Int, Vector{Segment}}()
+    nsegs = Int[]
+    evt = filter(x->istruth(x), evt_)
+    # Get all the possible simidxs
+    simidxs = evt .|> x->x.simidx1
+
+    # Loop over possible simidxs
+    for simidx in Set(simidxs)
+
+        # Aggregate the segments
+        sgs = filter(x->x.simidx1 == simidx, evt)
+        segs[simidx] = sgs
+        push!(nsegs, length(sgs))
+
+    end
+
+    angledata = SegmentPairAngle[]
+    for (simidx, sgs) in segs
+        for i in 1:length(sgs)
+            for j in i+1:length(sgs)
+                smd = sharemd(sgs[i], sgs[j])
+                moddiff = moduledifftype(sgs[i], sgs[j])
+                Δϕ = deltaphi(sgs[i], sgs[j])
+                Δθ = deltatheta(sgs[i], sgs[j])
+                Δxy = deltaxy(sgs[i], sgs[j])
+                if moddiff == 1 && Δϕ > 0.004
+                    println("$i $j")
+                    println(sgs[i])
+                    println(sgs[j])
+                end
+                if smd >= 1
+                    push!(angledata, SegmentPairAngle(smd, moddiff, Δϕ, Δθ, Δxy))
+                elseif smd < 0
+                    println("ERROR: these are same md! Why are you comparing same segments?")
+                end
+            end
+        end
+    end
+end
+
 
 # _________________________________________________________________________________________________________________________________
 function make_fb_mult_plots(fn)
@@ -405,18 +487,18 @@ function make_fb_mult_plots(fn)
     df = DataFrame(table)
 
     bins = if occursin("PU200", fn)
-        0:20:500
+        bins"25,0,500"
     else
-        0:1:20
+        bins"20,0,20"
     end
 
     nsims = Hist1D(df.nsims, bins)
     nsims_fb = Hist1D(df.nsims_fb, bins)
 
     bins = if occursin("PU200", fn)
-        0:1:100
+        bins"100,0,100"
     else
-        0:1:20
+        bins"20,0,20"
     end
 
     ndups = Hist1D(df.ndups, bins)
@@ -425,7 +507,7 @@ function make_fb_mult_plots(fn)
     p = plot_stack(
          backgrounds=[nsims],
          signals=[nsims_fb],
-         outputname=string("plots/",fn,"_nsims.{html,pdf}"),
+         outputname=string("plots/",fn,"_nsims.{html,png,pdf}"),
          backgroundlabels=["before fishbone"],
          signallabels=["after fishbone"],
          xaxistitle="N<sub>sims</sub>",
@@ -438,7 +520,7 @@ function make_fb_mult_plots(fn)
     p = plot_stack(
          backgrounds=[ndups],
          signals=[ndups_fb],
-         outputname=string("plots/",fn,"_ndups.{html,pdf}"),
+         outputname=string("plots/",fn,"_ndups.{html,png,pdf}"),
          backgroundlabels=["before fishbone"],
          signallabels=["after fishbone"],
          xaxistitle="N<sub>dups</sub>",
@@ -462,17 +544,12 @@ function make_angle_plots(fn)
         push!(as, angledata)
     end
 
-    ylog = occursin("PU200", fn)
-    yrange = [-1, 10]
-    ylog = false
-    yrange = [0, 500]
-
-    hs = as .|> x->Hist1D(abs.(x.Δϕ), 0:0.0005:0.02)
+    hs = as .|> x->Hist1D(abs.(x.Δϕ), bins"40,0,0.02", overflow=true)
 
     p = plot_stack(
                    backgrounds=[hs[4]],
                    signals=[hs[1], hs[2], hs[3]],
-                   outputname=string("plots/",fn,"_deltaphi.{html,pdf}"),
+                   outputname=string("plots/",fn,"_deltaphi.{html,png,pdf}"),
                    backgroundlabels=["moddiff4"],
                    signallabels=["moddiff1", "moddiff2", "moddiff3"],
                    xaxistitle="Δϕ [rad]",
@@ -480,16 +557,27 @@ function make_angle_plots(fn)
                    showbeaminfo=false,
                    backgroundcolors=[6004],
                    cmsextralabeltext="Simulation",
-                   ylog=ylog,
-                   yrange=yrange,
+                  );
+    p = plot_stack(
+                   backgrounds=[hs[4]],
+                   signals=[hs[1], hs[2], hs[3]],
+                   outputname=string("plots/",fn,"_zoomed_deltaphi.{html,png,pdf}"),
+                   backgroundlabels=["moddiff4"],
+                   signallabels=["moddiff1", "moddiff2", "moddiff3"],
+                   xaxistitle="Δϕ [rad]",
+                   showtotallegend=false,
+                   showbeaminfo=false,
+                   backgroundcolors=[6004],
+                   cmsextralabeltext="Simulation",
+                   yrange=[0,500],
                   );
 
-    hs = as .|> x->Hist1D(abs.(x.Δθ), 0:0.0005:0.02)
+    hs = as .|> x->Hist1D(abs.(x.Δθ), bins"40,0,0.02", overflow=true)
 
     p = plot_stack(
                    backgrounds=[hs[4]],
                    signals=[hs[1], hs[2], hs[3]],
-                   outputname=string("plots/",fn,"_deltarz.{html,pdf}"),
+                   outputname=string("plots/",fn,"_deltarz.{html,png,pdf}"),
                    backgroundlabels=["moddiff4"],
                    signallabels=["moddiff1", "moddiff2", "moddiff3"],
                    xaxistitle="Δrz [rad]",
@@ -497,16 +585,27 @@ function make_angle_plots(fn)
                    showbeaminfo=false,
                    backgroundcolors=[6004],
                    cmsextralabeltext="Simulation",
-                   ylog=ylog,
-                   yrange=yrange,
+                  );
+    p = plot_stack(
+                   backgrounds=[hs[4]],
+                   signals=[hs[1], hs[2], hs[3]],
+                   outputname=string("plots/",fn,"_zoomed_deltarz.{html,png,pdf}"),
+                   backgroundlabels=["moddiff4"],
+                   signallabels=["moddiff1", "moddiff2", "moddiff3"],
+                   xaxistitle="Δrz [rad]",
+                   showtotallegend=false,
+                   showbeaminfo=false,
+                   backgroundcolors=[6004],
+                   cmsextralabeltext="Simulation",
+                   yrange=[0, 500],
                   );
 
-    hs = as .|> x->Hist1D(abs.(x.Δxy), 0:0.05:4)
+    hs = as .|> x->Hist1D(abs.(x.Δxy), 0:0.1:10)
 
     p = plot_stack(
                    backgrounds=[hs[4]],
                    signals=[hs[1], hs[2], hs[3]],
-                   outputname=string("plots/",fn,"_deltaxy.{html,pdf}"),
+                   outputname=string("plots/",fn,"_deltaxy.{html,png,pdf}"),
                    backgroundlabels=["moddiff4"],
                    signallabels=["moddiff1", "moddiff2", "moddiff3"],
                    xaxistitle="Δxy [cm]",
@@ -514,36 +613,68 @@ function make_angle_plots(fn)
                    showbeaminfo=false,
                    backgroundcolors=[6004],
                    cmsextralabeltext="Simulation",
-                   ylog=ylog,
-                   yrange=yrange,
+                  );
+    p = plot_stack(
+                   backgrounds=[hs[4]],
+                   signals=[hs[1], hs[2], hs[3]],
+                   outputname=string("plots/",fn,"_zoomed_deltaxy.{html,png,pdf}"),
+                   backgroundlabels=["moddiff4"],
+                   signallabels=["moddiff1", "moddiff2", "moddiff3"],
+                   xaxistitle="Δxy [cm]",
+                   showtotallegend=false,
+                   showbeaminfo=false,
+                   backgroundcolors=[6004],
+                   cmsextralabeltext="Simulation",
+                   yrange=[0, 500],
                   );
 
-
-        # h = Hist1D(abs.(angledata.Δϕ), 0:0.0005:0.02)
-        # p = plot_stack(
-        #                backgrounds=[h],
-        #                signals=[nsims_fb],
-        #                outputname="nsims.{html,pdf}",
-        #                backgroundlabels=["before fishbone"],
-        #                signallabels=["after fishbone"],
-        #                xaxistitle="N<sub>sims</sub>",
-        #                showtotallegend=false,
-        #                showbeaminfo=false,
-        #               );
-
-
-
-        # p = plot(trace, Layout(title="Δϕ distribution diffmode=$item", xaxis_title="Δϕ [rad]", yaxis_title="Events", bargap=0, template="simple_white"))
-        # savefig(p, string("plots/moddifftypewide",item,"_",jobidx,"_dphi.pdf"))
-        # savefig(p, string("plots/moddifftypewide",item,"_",jobidx,"_dphi.png"))
-
-        # trace = PlotlyJSWrapper.build_hist1dtrace(PlotlyJSWrapper.make_fhist1d(abs.(angledata.Δθ), 0:0.0005:0.02), witherror=true)
-        # # trace.fields[:marker][:color] = "blue"
-        # # trace.fields[:opacity] = 0.75
-        # p = plot(trace, Layout(title="Δrz distribution diffmode=$item", xaxis_title="Δrz [rad]", yaxis_title="Events", bargap=0, template="simple_white"))
-        # savefig(p, string("plots/moddifftypewide",item,"_",jobidx,"_drz.pdf"))
-        # savefig(p, string("plots/moddifftypewide",item,"_",jobidx,"_drz.png"))
-    # end
 end
+
+# _________________________________________________________________________________________________________________________________
+function make_mult_hists(sample)
+    idxs = ["12", "23", "34", "45", "56"]
+    hists = Dict{String, Vector{Hist1D}}()
+    for idx in idxs
+        table = Arrow.Table(string("data/fb/",sample,"_segments",idx,".arrow"))
+        df = DataFrame(table)
+        bins = if occursin("PU200", sample)
+            bins"25,0,500"
+        else
+            bins"20,0,20"
+        end
+        nsims = Hist1D(df.nsims, bins)
+        nsims_fb = Hist1D(df.nsims_fb, bins)
+        bins = if occursin("PU200", sample)
+            bins"100,0,100"
+        else
+            bins"20,0,20"
+        end
+        ndups = Hist1D(df.ndups, bins)
+        ndups_fb = Hist1D(df.ndups_fb, bins)
+        hists["mult$idx"] = [nsims, nsims_fb, ndups, ndups_fb]
+    end
+    hists
+end
+
+# _________________________________________________________________________________________________________________________________
+function make_angle_hists(sample)
+    idxs = ["12", "23", "34", "45", "56"]
+    hists = Dict{String, Vector{Hist1D}}()
+    for idx in idxs
+        table = Arrow.Table(string("data/angle/",sample,"_segments",idx,".arrow"))
+        df = DataFrame(table)
+        as = []
+        for item in 1:4
+            angledata = df |> @filter(_.moddifftype == item) |> DataFrame
+            push!(as, angledata)
+        end
+        hs = as .|> x->Hist1D(abs.(x.Δϕ), bins"1080,0,0.04", overflow=true)
+        hists["Δϕ$idx"] = hs
+        hs = as .|> x->Hist1D(abs.(x.Δθ), bins"1080,0,0.6", overflow=true)
+        hists["Δθ$idx"] = hs
+    end
+    hists
+end
+
 
 end
